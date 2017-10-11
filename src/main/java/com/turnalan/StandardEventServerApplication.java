@@ -2,6 +2,9 @@ package com.turnalan;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.Queue;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.time.*;
@@ -23,13 +26,13 @@ import org.springframework.scheduling.annotation.EnableAsync;
 @EnableAsync
 public class StandardEventServerApplication extends SpringBootServletInitializer 
 {
-	String temp = null;
-	
 	HashMap<String, ArrayList<String>> hashMap = new HashMap<>();
-	HashMap<String, Boolean> guidFinsihed = new HashMap<>();
+	HashMap<String, String> guidStatus = new HashMap<>();
+	Queue<String> waitingQueue = new LinkedList<>();
 
 	String curUser = null;
 	LocalTime lastUserAcitityTime = null;
+	LocalTime LastRequestOnQueueTime = null;
 	
 	@RequestMapping(value = "/events/debug/showevent", method=RequestMethod.GET)
     String ShowEvents() 
@@ -57,12 +60,12 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
 	{
 		StringBuilder sb = new StringBuilder();
 		
-		for (String key : guidFinsihed.keySet()) 
+		for (String key : guidStatus.keySet()) 
 		{	
 			sb.append(key);
 			sb.append(":" + System.lineSeparator());
 			
-			sb.append(guidFinsihed.get(key));
+			sb.append(guidStatus.get(key));
 			sb.append(";" + System.lineSeparator());
 		}
 		
@@ -73,6 +76,20 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
 	 boolean isUsing() 
 	 {
 		 return curUser != null;
+	 }
+	 
+	 @RequestMapping(value = "/events/debug/showQueue", method=RequestMethod.GET)
+	 String showQueue() 
+	 {
+		 StringBuilder sb = new StringBuilder();
+		 sb.append("LastRequestOnQueueTime: "+ LastRequestOnQueueTime + ", ");
+			
+		 for (String key : waitingQueue)
+		 {
+			 sb.append(key + ", ");
+		 }
+		 
+		 return sb.toString();
 	 }
 	    
 	 @RequestMapping(value = "/events/debug/curUser", method=RequestMethod.GET)
@@ -91,25 +108,14 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
     String Reset() 
 	{
     	hashMap.clear();
-    	guidFinsihed.clear();
+    	guidStatus.clear();
+    	waitingQueue.clear();
 		curUser = null;
 		lastUserAcitityTime = null;
+		LastRequestOnQueueTime = null;
 		return "done";
     }
     
-    @RequestMapping(value = "/events/validation/{appid}/POST", method=RequestMethod.POST)
-    String ValidationFake(@RequestBody String string) 
-	{
-    	temp = string;
-    	return "ok";
-    }
-    
-    @RequestMapping(value = "/events/validation/{appid}.json", method=RequestMethod.GET)
-    String Validation(@PathVariable String appid) 
-	{
-    	return temp;
-    }
-	
     @RequestMapping(value = "/events/{name}/{order}", method=RequestMethod.GET)
     String GetEvent(@PathVariable String name, @PathVariable int order) 
     {
@@ -134,44 +140,90 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
     @RequestMapping(value = "/events/guid/{guid}", method=RequestMethod.GET)
     String GetStatus(@PathVariable String guid) 
     {
-    	if (!guidFinsihed.containsKey(guid))
+    	if (!guidStatus.containsKey(guid))
     	{
-    		return "Not Found";
+    		return "NOT_FOUND";
     	}
     	
-    	return guidFinsihed.get(guid).toString();
+    	return guidStatus.get(guid).toString();
     }
     
     @RequestMapping(value = "/events/request", method=RequestMethod.POST)
-    String RequestServerUsage(@RequestBody String string) 
+    String RequestServerUsage(@RequestBody String guid) 
     {
-    	if (curUser != null && Math.abs(Duration.between(LocalTime.now(), lastUserAcitityTime).toMinutes()) <= 5)
+    	if (curUser!= null && curUser.equals(guid))
+    	{
+    		return "ok";
+    	}
+    	
+    	// Add to the waiting queue if it is not
+    	if (!waitingQueue.contains(guid))
+		{
+			waitingQueue.add(guid);
+		}
+    	
+    	// If there is someone who is using the serve, and the not active time is less than 1 min
+    	// deny the access request, but add it to the waiting queue
+    	if (curUser != null && Math.abs(Duration.between(LocalTime.now(), lastUserAcitityTime).toMinutes()) <= 1)
     	{
     		return "deny";
     	}
     	
-    	// If the previous user is not active
-    	if (curUser != null)
+    	// If the previous user is not active more than 1 min, 
+    	// let the first request on the waiting queue take over the server
+    	if (curUser != null && Math.abs(Duration.between(LocalTime.now(), lastUserAcitityTime).toMinutes()) > 1)
     	{
-    		guidFinsihed.put(curUser, true);
+    		guidStatus.put(curUser, "TIMED_OUT");
+    		hashMap.clear();
+        	curUser = null;
+        	lastUserAcitityTime = null;
+    		return "deny";
     	}
     	
+    	// If the request is not the first request, and the queue is not empty, deny it
+    	if (!guid.equals(waitingQueue.peek()))
+    	{
+    		if (LastRequestOnQueueTime == null)
+    		{
+    			LastRequestOnQueueTime = LocalTime.now();
+    			return "deny";
+    		}
+    		
+    		if (Math.abs(Duration.between(LocalTime.now(), LastRequestOnQueueTime).toMinutes()) <= 1)
+    		{
+    			return "deny";
+    		}
+    		
+    		if (Math.abs(Duration.between(LocalTime.now(), LastRequestOnQueueTime).toMinutes()) > 1)
+    		{
+    			waitingQueue.poll();
+    			LastRequestOnQueueTime = null;
+    			return "deny";
+    		}
+    	}
+    	
+    	// If the request is the first request OR the queue is empty
+    	curUser = waitingQueue.poll();
     	hashMap.clear();
-    	curUser = string;
     	lastUserAcitityTime = LocalTime.now();
-    	guidFinsihed.put(string, false);
+    	LastRequestOnQueueTime = null;
+    	guidStatus.put(curUser, "STARTED");
     	return "ok";
     }
     
     @RequestMapping(value = "/events/finish", method=RequestMethod.POST)
     String FinishServerUsage(@RequestBody String string) 
     {
+    	String guid = string.split(":")[0];
+    	String test_passed = string.split(":")[1];
+    	String test_total = string.split(":")[2];
+    	
     	if (curUser == null)
     	{
     		return "curUser is null";
     	}
     	
-    	if (!curUser.equals(string))
+    	if (!curUser.equals(guid))
     	{
     		return "curUser does not match with the post" + curUser + ":" + string;
     	}
@@ -179,7 +231,7 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
     	hashMap.clear();
     	curUser = null;
     	lastUserAcitityTime = null;
-    	guidFinsihed.put(string, true);
+    	guidStatus.put(guid, "COMPLETED:" + test_passed + ":" + test_total);
     	return "ok";
     }
     
