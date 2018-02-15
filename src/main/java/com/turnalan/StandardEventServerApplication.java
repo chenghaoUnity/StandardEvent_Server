@@ -1,8 +1,10 @@
 package com.turnalan;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedList;
+import java.util.PriorityQueue;
 import java.util.Queue;
 
 import org.json.JSONArray;
@@ -14,11 +16,20 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.support.SpringBootServletInitializer;
+import org.springframework.http.ResponseEntity;
 import org.springframework.scheduling.annotation.EnableAsync;
+
+class AnalyticsEvent
+{
+	public String custom_params;
+	public String name;
+	public long ts;
+}
 
 @RestController
 @EnableAutoConfiguration
@@ -26,7 +37,9 @@ import org.springframework.scheduling.annotation.EnableAsync;
 @EnableAsync
 public class StandardEventServerApplication extends SpringBootServletInitializer 
 {
-	HashMap<String, ArrayList<String>> hashMap = new HashMap<>();
+	HashMap<String, PriorityQueue<AnalyticsEvent>> hashMap = new HashMap<>();
+	HashMap<String, Object> remoteSettings = new HashMap<>(); 
+	
 	HashMap<String, String> guidStatus = new HashMap<>();
 	Queue<String> waitingQueue = new LinkedList<>();
 
@@ -44,11 +57,12 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
 			sb.append(key);
 			sb.append(":" + System.lineSeparator());
 			
-			for (int i = 0; i < hashMap.get(key).size(); i++) 
+			for (AnalyticsEvent e : hashMap.get(key))
 			{
-				sb.append(hashMap.get(key).get(i));
+				sb.append(e.custom_params);
 				sb.append("," + System.lineSeparator());
 			}
+			
 			sb.append("; " + System.lineSeparator());
 		}
 		
@@ -108,6 +122,7 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
     String Reset() 
 	{
     	hashMap.clear();
+    	remoteSettings.clear();
     	guidStatus.clear();
     	waitingQueue.clear();
 		curUser = null;
@@ -116,12 +131,19 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
 		return "done";
     }
     
+    // Above are all debug endpoints
+    
     @RequestMapping(value = "/events/{name}/{order}", method=RequestMethod.GET)
     String GetEvent(@PathVariable String name, @PathVariable int order) 
     {
     	if (curUser != null)
     	{
     		lastUserAcitityTime = LocalTime.now();
+    	}
+    	
+    	if (order < 0)
+    	{
+    		return "none";
     	}
     	
     	if (!hashMap.containsKey(name)) 
@@ -134,7 +156,7 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
     		return "none";
     	}
     	
-    	return hashMap.get(name).get(order);
+    	return new ArrayList<AnalyticsEvent>(hashMap.get(name)).get(order).custom_params;
     }
     
     @RequestMapping(value = "/events/guid/{guid}", method=RequestMethod.GET)
@@ -175,6 +197,7 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
     	{
     		guidStatus.put(curUser, "TIMED_OUT");
     		hashMap.clear();
+    		remoteSettings.clear();
         	curUser = null;
         	lastUserAcitityTime = null;
     		return "deny";
@@ -205,6 +228,7 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
     	// If the request is the first request OR the queue is empty
     	curUser = waitingQueue.poll();
     	hashMap.clear();
+    	remoteSettings.clear();
     	lastUserAcitityTime = LocalTime.now();
     	LastRequestOnQueueTime = null;
     	guidStatus.put(curUser, "STARTED");
@@ -238,11 +262,6 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
     @RequestMapping(value = "/events", method=RequestMethod.POST)
 	void PostEvent(@RequestBody String string)  
     {
-    	if (curUser == null)
-    	{
-    		return;
-    	}
-    	
     	try
     	{
 	        JSONObject obj = new JSONObject(string); 
@@ -258,41 +277,204 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
 					
 					if (type.equals("custom")) 
 					{	
-						String name = entry.getString("name");
-						String custom_params = null;
+						AnalyticsEvent event = new AnalyticsEvent();
+						event.name = entry.getString("name");
+						event.ts = Long.parseLong(entry.getString("ts"));
 						
-						System.out.println(name);
+						System.out.println(event.name);
+						System.out.println(event.ts);
 						
 						if (entry.has("custom_params"))
 						{
-							custom_params = entry.getString("custom_params");
-							System.out.println(entry.getString("custom_params"));
+							event.custom_params = entry.getString("custom_params");
+							System.out.println(event.custom_params);
 						}
-						
+
 						System.out.println();
 						
-						if (!hashMap.containsKey(name)) 
+						if (!hashMap.containsKey(event.name)) 
 						{
-							hashMap.put(name, new ArrayList<String>());
-							hashMap.get(name).add(custom_params);
+							hashMap.put(event.name, new PriorityQueue<AnalyticsEvent>(new StringLengthComparator()));
+							hashMap.get(event.name).add(event);
 							continue;
 						}
 
-						if (hashMap.get(name).contains(custom_params)) 
-						{
-							continue;
-						}
+//						if (hashMap.get(name).contains(custom_params)) 
+//						{
+//							continue;
+//						}
 						
-						hashMap.get(name).add(custom_params);
+						hashMap.get(event.name).add(event);
 					}
 				
 				} catch(Exception e) {
-					
+					continue;
 				}
 			}
     	} catch (Exception e) {
     		
+    		try
+        	{
+    			String[] splitedString = string.split("\n");
+    			
+    			for (int i = 1; i < splitedString.length; i++) 
+    			{
+    				try 
+    				{
+    					String reformated = splitedString[i];
+    	    			
+    					JSONObject obj = new JSONObject(reformated); 
+    					
+    					if (obj.getString("type").contains("custom"))
+    					{
+    						JSONObject entry = obj.getJSONObject("msg");
+    						AnalyticsEvent event = new AnalyticsEvent();
+    						event.name = entry.getString("name");
+    						event.ts = Long.parseLong(entry.getString("ts"));
+    						
+    						System.out.println(event.name);
+    						System.out.println(event.ts);
+    						
+    						if (entry.has("custom_params"))
+    						{
+    							event.custom_params = entry.getString("custom_params");
+    							System.out.println(event.custom_params);
+    						}
+    						
+    						System.out.println();
+    						
+    						if (!hashMap.containsKey(event.name)) 
+    						{
+    							hashMap.put(event.name, new PriorityQueue<AnalyticsEvent>(new StringLengthComparator()));
+    							hashMap.get(event.name).add(event);
+    							continue;
+    						}
+
+//    						if (hashMap.get(name).contains(custom_params)) 
+//    						{
+//    							continue;
+//    						}
+    						
+    						hashMap.get(event.name).add(event);
+    					}
+    				
+    				} catch(Exception e2) {
+    					continue;
+    				}
+    			}
+        	} catch (Exception e2) {
+        		
+        	}
     	}
+    }
+    
+    @RequestMapping(value = "/events/remoteSettings/initilize", method=RequestMethod.POST)
+    void remoteSettingsPostInitilize() 
+    {
+    	remoteSettings.clear();
+    }
+    
+    @RequestMapping(value = "/events/remoteSettings/set", method=RequestMethod.POST)
+    void remoteSettingsPost(@RequestBody String string) 
+    {
+    	String[] splitedRequests = string.split("%%");
+    	
+    	for (String request : splitedRequests)
+    	{
+    		if (request.length() <= 1)
+    		{
+    			continue;
+    		}
+    		
+        	String[] splited = request.split("&&");
+        	
+        	String key = splited[0];
+        	String type = splited[1];
+        	
+        	if (type.equals("String"))
+        	{
+        		remoteSettings.put(key, splited[2]);
+        	}
+        	
+        	if (type.equals("Float"))
+        	{
+        		remoteSettings.put(key, Float.parseFloat(splited[2]));
+        	}
+        	
+        	if (type.equals("Bool"))
+        	{
+        		remoteSettings.put(key, Boolean.parseBoolean(splited[2]));
+        	}
+        	
+        	if (type.equals("Int"))
+        	{
+        		remoteSettings.put(key, Integer.parseInt(splited[2]));
+        	}
+    	}
+    }
+    
+    @RequestMapping(value = "/events/remoteSettings/remove", method=RequestMethod.POST)
+    void remoteSettingsRemove(@RequestBody String string) 
+    {
+    	remoteSettings.remove(string);
+    }
+    
+    @RequestMapping(value = "/events/remoteSettings", method=RequestMethod.POST)
+    String remoteSettingsGetNewFormat() 
+    {
+    	String remoteSettingsKey = "";
+    	int keySetLenght = remoteSettings.keySet().size();
+    	int index = 0;
+    	
+    	for (String key : remoteSettings.keySet())
+    	{
+    		if (remoteSettings.get(key).getClass() == String.class)
+    		{
+    			remoteSettingsKey += "\"" + key + "\": \"" + remoteSettings.get(key)+ "\"";
+    		}
+    		else
+    		{
+    			remoteSettingsKey += "\"" + key + "\": " + remoteSettings.get(key);
+    		}
+    		
+    		if (index++ != keySetLenght - 1)
+    		{
+    			remoteSettingsKey += ",";
+    		}
+    	}
+    	
+    	String remoteConfig = "{\"prefs\":{"+ remoteSettingsKey +"},\"analytics\":{\"enabled\":true,\"events\":{\"custom_event\":{\"max_event_per_hour\":100000}}}}";
+    	
+    	return remoteConfig;
+    }
+    
+    @RequestMapping(value = "/events/remoteSettings/{appid}.json", method=RequestMethod.GET)
+    String remoteSettingsGet(@PathVariable String appid) 
+    {
+    	String remoteSettingsKey = "";
+    	int keySetLenght = remoteSettings.keySet().size();
+    	int index = 0;
+    	
+    	for (String key : remoteSettings.keySet())
+    	{
+    		if (remoteSettings.get(key).getClass() == String.class)
+    		{
+    			remoteSettingsKey += "\"" + key + "\": \"" + remoteSettings.get(key)+ "\"";
+    		}
+    		else
+    		{
+    			remoteSettingsKey += "\"" + key + "\": " + remoteSettings.get(key);
+    		}
+    		
+    		if (index++ != keySetLenght - 1)
+    		{
+    			remoteSettingsKey += ",";
+    		}
+    	}
+    	
+    	String remoteConfig = "{\"prefs\":{"+ remoteSettingsKey +"},\"analytics\":{\"enabled\":true,\"events\":{\"custom_event\":{\"max_event_per_hour\":100000}}}}";
+    	
+    	return remoteConfig;
     }
     
     @Override
@@ -304,5 +486,49 @@ public class StandardEventServerApplication extends SpringBootServletInitializer
 	public static void main(String[] args) 
 	{
 		SpringApplication.run(StandardEventServerApplication.class);
+	}
+	
+	// Helper functions.
+	// Get index from the queue.
+	private AnalyticsEvent getIndex(int index, PriorityQueue<AnalyticsEvent> queue)
+	{
+		queue.toArray()
+		if (index > queue.size() || index < 0)
+		{
+			return new AnalyticsEvent();
+		}
+		
+		PriorityQueue<AnalyticsEvent> copy = queue;
+		
+		for (int i = 0; i < queue.size(); i++)
+		{
+			if (i == index)
+			{
+				return copy.peek();
+			}
+			else
+			{
+				copy.poll();
+			}
+		}
+		
+		return new AnalyticsEvent();
+	}
+	
+	// Comparator for the PriorityQueue.
+	public class StringLengthComparator implements Comparator<AnalyticsEvent>
+	{
+	    @Override
+	    public int compare(AnalyticsEvent x, AnalyticsEvent y)
+	    {
+	    	if (x.ts < y.ts)
+	    	{
+	    		return -1;
+	    	}
+	    	else
+	    	{
+	    		return 1;
+	    	}
+	    }
 	}
 }
